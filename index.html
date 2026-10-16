@@ -73,6 +73,7 @@ code { font-family: ui-monospace, Menlo, monospace; font-size: 13px; }
 
   <div class="controls">
     <button id="start" class="primary">Taramayı başlat</button>
+    <button id="pick">Tek cihaz seç</button>
     <button id="stop" disabled>Durdur</button>
     <button id="demo">Demo verisi</button>
     <label><input type="checkbox" id="onlyPods" checked> Yalnızca AirPods (0x07)</label>
@@ -86,7 +87,7 @@ code { font-family: ui-monospace, Menlo, monospace; font-size: 13px; }
     <summary>Nerede çalışır?</summary>
     <p>Sayfa Web Bluetooth'un tarama özelliğini (<code>requestLEScan</code>) kullanır ve HTTPS gerektirir.</p>
     <p><b>Android / masaüstü Chrome:</b> <code>chrome://flags/#enable-experimental-web-platform-features</code> açılmalı.</p>
-    <p><b>iPhone:</b> Safari ve iOS'taki diğer tüm tarayıcılar Web Bluetooth desteklemez. Bluefy gibi Web Bluetooth destekli bir tarayıcı gerekir.</p>
+    <p><b>iPhone:</b> Safari ve iOS'taki diğer tüm tarayıcılar Web Bluetooth desteklemez. Bluefy gibi tarayıcılar genel taramayı desteklemeyebilir; o zaman "Tek cihaz seç" ile listeden bir cihaz seçip yalnızca onun yayınları izlenir (<code>watchAdvertisements</code>).</p>
     <p>Pil ve sol/sağ ayrımı Apple'ın belgelemediği, topluluk tarafından çözülmüş bir formata dayanır.</p>
   </details>
 </main>
@@ -112,6 +113,8 @@ const TYPES = {
 const $ = (id) => document.getElementById(id);
 const devices = new Map();
 let scan = null, demoTimer = null;
+const watched = [];
+const isIOS = /iPhone|iPad|iPod/.test(navigator.userAgent);
 
 const hex = (b) => [...b].map((x) => x.toString(16).padStart(2, "0")).join(" ");
 const battery = (n) => (n > 10 ? "?" : `%${n * 10}`);
@@ -227,7 +230,9 @@ async function start() {
     return setStatus("Bu tarayıcıda Web Bluetooth yok. iPhone'da Safari/Chrome desteklemez; Bluefy gibi bir tarayıcı dene. Android/masaüstünde Chrome kullan.", true);
   }
   if (!navigator.bluetooth.requestLEScan) {
-    return setStatus("Web Bluetooth var ama tarama (requestLEScan) kapalı.\nChrome'da chrome://flags/#enable-experimental-web-platform-features ayarını açıp tarayıcıyı yeniden başlat.", true);
+    return setStatus(isIOS
+      ? "Bu tarayıcı çevredeki tüm cihazları taramayı (requestLEScan) desteklemiyor.\n\"Tek cihaz seç\" ile listeden AirPods'u seçip yalnızca onu izlemeyi dene."
+      : "Web Bluetooth var ama tarama (requestLEScan) kapalı.\nChrome'da chrome://flags/#enable-experimental-web-platform-features ayarını açıp tarayıcıyı yeniden başlat.\nYa da \"Tek cihaz seç\" ile tek bir cihazı izle.", true);
   }
   try {
     stopDemo();
@@ -246,9 +251,50 @@ function onEvent(ev) {
   onAdvert(ev.device.id, ev.rssi, new Uint8Array(dv.buffer, dv.byteOffset, dv.byteLength));
 }
 
+// Genel tarama yoksa: kullanıcı listeden bir cihaz seçer, yalnızca onun yayınları izlenir
+async function pick() {
+  if (!window.isSecureContext) return setStatus("Sayfa HTTPS üzerinden açılmalı.", true);
+  if (!navigator.bluetooth) return setStatus("Bu tarayıcıda Web Bluetooth yok.", true);
+  let device;
+  try {
+    try {
+      device = await navigator.bluetooth.requestDevice({
+        filters: [{ manufacturerData: [{ companyIdentifier: APPLE }] }],
+        optionalManufacturerData: [APPLE],
+      });
+    } catch (e) {
+      // Üretici filtresini desteklemeyen tarayıcılarda tüm cihazları listele
+      if (e.name !== "TypeError") throw e;
+      device = await navigator.bluetooth.requestDevice({ acceptAllDevices: true, optionalManufacturerData: [APPLE] });
+    }
+  } catch (e) {
+    if (e.name === "NotFoundError") return setStatus("Cihaz seçilmedi.");
+    return setStatus(`Cihaz seçilemedi: ${e.name}: ${e.message}`, true);
+  }
+  if (!device.watchAdvertisements) {
+    return setStatus(`"${device.name || device.id}" seçildi ama bu tarayıcı yayın izlemeyi (watchAdvertisements) desteklemiyor. Web üzerinden RSSI ve pil okunamaz.`, true);
+  }
+  try {
+    stopDemo();
+    const ctl = new AbortController();
+    device.addEventListener("advertisementreceived", onEvent);
+    await device.watchAdvertisements({ signal: ctl.signal });
+    watched.push({ device, ctl });
+    $("stop").disabled = false;
+    setStatus(`İzleniyor: ${device.name || device.id} (${watched.length} cihaz). Apple verisi gelmezse listede görünmez; "Yalnızca AirPods" filtresini kapat.`);
+  } catch (e) {
+    setStatus(`Yayın izleme başlatılamadı: ${e.name}: ${e.message}`, true);
+  }
+}
+
 function stop() {
   if (scan) { scan.stop(); scan = null; }
-  if (navigator.bluetooth) navigator.bluetooth.removeEventListener("advertisementreceived", onEvent);
+  for (const { device, ctl } of watched.splice(0)) {
+    ctl.abort();
+    if (device.unwatchAdvertisements) device.unwatchAdvertisements();
+    device.removeEventListener("advertisementreceived", onEvent);
+  }
+  if (navigator.bluetooth && navigator.bluetooth.removeEventListener) navigator.bluetooth.removeEventListener("advertisementreceived", onEvent);
   stopDemo();
   $("start").disabled = false; $("stop").disabled = true;
   setStatus("Durduruldu.");
@@ -272,6 +318,7 @@ function startDemo() {
 function stopDemo() { if (demoTimer) { clearInterval(demoTimer); demoTimer = null; } }
 
 $("start").onclick = start;
+$("pick").onclick = pick;
 $("stop").onclick = stop;
 $("demo").onclick = startDemo;
 $("onlyPods").onchange = render;
