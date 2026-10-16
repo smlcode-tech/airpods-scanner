@@ -1,0 +1,282 @@
+<!doctype html>
+<html lang="tr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AirPods Tarayıcı</title>
+<style>
+:root {
+  --bg: #f6f7f9; --card: #ffffff; --fg: #15171a; --muted: #6b7280; --line: #e3e6ea;
+  --accent: #0a84ff; --good: #1f9d55; --warn: #c27c0e; --bad: #d64545; --bar-bg: #e9edf1;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #0f1113; --card: #181b1f; --fg: #eef0f2; --muted: #8b939c; --line: #2a2f35;
+    --accent: #3d9bff; --good: #3ccf7a; --warn: #f0a83a; --bad: #ff6b6b; --bar-bg: #262b31;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #0f1113; --card: #181b1f; --fg: #eef0f2; --muted: #8b939c; --line: #2a2f35;
+  --accent: #3d9bff; --good: #3ccf7a; --warn: #f0a83a; --bad: #ff6b6b; --bar-bg: #262b31;
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0; background: var(--bg); color: var(--fg);
+  font: 15px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+}
+main { max-width: 760px; margin: 0 auto; padding: 20px 16px 48px; }
+h1 { font-size: 22px; margin: 0 0 4px; }
+.sub { color: var(--muted); margin: 0 0 16px; }
+.controls { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-bottom: 12px; }
+button {
+  font: inherit; border: 1px solid var(--line); background: var(--card); color: var(--fg);
+  padding: 8px 14px; border-radius: 10px; cursor: pointer;
+}
+button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+button:disabled { opacity: .5; cursor: default; }
+label { color: var(--muted); display: inline-flex; gap: 6px; align-items: center; }
+#status {
+  padding: 10px 12px; border-radius: 10px; background: var(--card); border: 1px solid var(--line);
+  margin-bottom: 16px; color: var(--muted); white-space: pre-line;
+}
+#status.err { color: var(--bad); border-color: var(--bad); }
+.list { display: grid; gap: 10px; }
+.dev {
+  background: var(--card); border: 1px solid var(--line); border-radius: 14px; padding: 12px 14px;
+  transition: opacity .4s;
+}
+.dev.stale { opacity: .45; }
+.row { display: flex; justify-content: space-between; gap: 8px; align-items: baseline; flex-wrap: wrap; }
+.name { font-weight: 600; }
+.tag { font-size: 12px; color: var(--muted); font-family: ui-monospace, Menlo, monospace; }
+.rssi { display: flex; align-items: center; gap: 10px; margin: 8px 0 6px; }
+.bar { flex: 1; height: 8px; border-radius: 4px; background: var(--bar-bg); overflow: hidden; }
+.bar > i { display: block; height: 100%; background: var(--accent); transition: width .3s; }
+.rssi b { font-variant-numeric: tabular-nums; min-width: 92px; text-align: right; font-weight: 500; }
+.batt { display: flex; gap: 16px; flex-wrap: wrap; font-variant-numeric: tabular-nums; }
+.batt span { color: var(--muted); }
+.batt strong { color: var(--fg); font-weight: 600; }
+.raw {
+  margin-top: 8px; font: 12px/1.4 ui-monospace, Menlo, monospace; color: var(--muted);
+  word-break: break-all;
+}
+.empty { color: var(--muted); text-align: center; padding: 32px 0; }
+details { margin-top: 24px; color: var(--muted); }
+details p { margin: 6px 0; }
+code { font-family: ui-monospace, Menlo, monospace; font-size: 13px; }
+</style>
+</head>
+<body>
+<main>
+  <h1>AirPods Tarayıcı</h1>
+  <p class="sub">Çevredeki Apple BLE yayınlarını (üretici 0x004C) dinler, AirPods'ları sinyal gücüne göre sıralar.</p>
+
+  <div class="controls">
+    <button id="start" class="primary">Taramayı başlat</button>
+    <button id="stop" disabled>Durdur</button>
+    <button id="demo">Demo verisi</button>
+    <label><input type="checkbox" id="onlyPods" checked> Yalnızca AirPods (0x07)</label>
+    <label><input type="checkbox" id="showRaw"> Ham bayt</label>
+  </div>
+
+  <div id="status">Hazır.</div>
+  <div id="list" class="list"><div class="empty">Henüz cihaz yok.</div></div>
+
+  <details>
+    <summary>Nerede çalışır?</summary>
+    <p>Sayfa Web Bluetooth'un tarama özelliğini (<code>requestLEScan</code>) kullanır ve HTTPS gerektirir.</p>
+    <p><b>Android / masaüstü Chrome:</b> <code>chrome://flags/#enable-experimental-web-platform-features</code> açılmalı.</p>
+    <p><b>iPhone:</b> Safari ve iOS'taki diğer tüm tarayıcılar Web Bluetooth desteklemez. Bluefy gibi Web Bluetooth destekli bir tarayıcı gerekir.</p>
+    <p>Pil ve sol/sağ ayrımı Apple'ın belgelemediği, topluluk tarafından çözülmüş bir formata dayanır.</p>
+  </details>
+</main>
+
+<script>
+const APPLE = 0x004c;
+const STALE_MS = 15000, DROP_MS = 60000;
+
+const MODELS = {
+  0x2002: "AirPods 1", 0x200f: "AirPods 2", 0x2013: "AirPods 3",
+  0x200e: "AirPods Pro", 0x2014: "AirPods Pro 2 (Lightning)", 0x2024: "AirPods Pro 2 (USB-C)",
+  0x200a: "AirPods Max", 0x201f: "AirPods Max (USB-C)",
+  0x2019: "AirPods 4", 0x201b: "AirPods 4 ANC",
+};
+
+// Continuity TLV türleri: hangi Apple yayınını gördüğünü doğrulamak için
+const TYPES = {
+  0x02: "iBeacon", 0x05: "AirDrop", 0x07: "Proximity Pairing (AirPods)", 0x09: "AirPlay hedef",
+  0x0c: "Handoff", 0x0d: "Wi-Fi ayarları", 0x0f: "Nearby Action", 0x10: "Nearby Info (iPhone/Mac)",
+  0x12: "Find My",
+};
+
+const $ = (id) => document.getElementById(id);
+const devices = new Map();
+let scan = null, demoTimer = null;
+
+const hex = (b) => [...b].map((x) => x.toString(16).padStart(2, "0")).join(" ");
+const battery = (n) => (n > 10 ? "?" : `%${n * 10}`);
+
+function parseApple(bytes) {
+  const out = [];
+  for (let i = 0; i + 2 <= bytes.length; ) {
+    const t = bytes[i], len = bytes[i + 1];
+    out.push({ type: t, body: bytes.slice(i + 2, i + 2 + len) });
+    i += 2 + len;
+  }
+  return out;
+}
+
+// body: 0x07 TLV'sinin uzunluk baytından sonraki içerik
+function parseProximity(b) {
+  if (b.length < 7) return null;
+  const model = b[1] | (b[2] << 8);
+  const status = b[3], pods = b[4], flagsCase = b[5];
+  // OpenPods'taki yorum: status'ün 0x20 biti 0 ise sol/sağ nibble'ları yer değiştirir.
+  const flip = (status & 0x20) === 0;
+  const hi = pods >> 4, lo = pods & 0x0f;
+  const [left, right] = flip ? [hi, lo] : [lo, hi];
+  const chg = flagsCase >> 4;
+  return {
+    model,
+    name: MODELS[model] || `Bilinmeyen model 0x${model.toString(16).padStart(4, "0")}`,
+    left: battery(left), right: battery(right), case: battery(flagsCase & 0x0f),
+    chargeL: !!(chg & (flip ? 0b10 : 0b01)),
+    chargeR: !!(chg & (flip ? 0b01 : 0b10)),
+    chargeCase: !!(chg & 0b100),
+    status,
+  };
+}
+
+function onAdvert(id, rssi, bytes) {
+  const tlvs = parseApple(bytes);
+  if (!tlvs.length) return;
+  let d = devices.get(id);
+  if (!d) {
+    d = { id, hist: [], info: null, types: new Set() };
+    devices.set(id, d);
+  }
+  if (typeof rssi === "number") {
+    d.hist.push(rssi);
+    if (d.hist.length > 5) d.hist.shift();
+  }
+  d.seen = Date.now();
+  d.raw = bytes;
+  for (const { type, body } of tlvs) {
+    d.types.add(type);
+    if (type === 0x07) d.info = parseProximity(body) || d.info;
+  }
+  scheduleRender();
+}
+
+let renderPending = false;
+function scheduleRender() {
+  if (renderPending) return;
+  renderPending = true;
+  requestAnimationFrame(() => { renderPending = false; render(); });
+}
+
+const avg = (h) => (h.length ? h.reduce((a, b) => a + b, 0) / h.length : -100);
+
+function render() {
+  const now = Date.now();
+  const onlyPods = $("onlyPods").checked, showRaw = $("showRaw").checked;
+  for (const [k, d] of devices) if (now - d.seen > DROP_MS) devices.delete(k);
+  const rows = [...devices.values()]
+    .filter((d) => !onlyPods || d.info)
+    .sort((a, b) => avg(b.hist) - avg(a.hist));
+  const list = $("list");
+  if (!rows.length) {
+    list.innerHTML = `<div class="empty">${devices.size ? "AirPods yayını yok — filtreyi kapatıp diğer Apple yayınlarına bak." : "Henüz cihaz yok."}</div>`;
+    return;
+  }
+  list.innerHTML = rows.map((d) => {
+    const a = avg(d.hist);
+    const pct = Math.max(0, Math.min(100, ((a + 100) / 60) * 100));
+    const types = [...d.types].map((t) => TYPES[t] || `0x${t.toString(16).padStart(2, "0")}`).join(", ");
+    const i = d.info;
+    const bolt = (on) => (on ? " ⚡" : "");
+    return `<div class="dev${now - d.seen > STALE_MS ? " stale" : ""}">
+      <div class="row">
+        <span class="name">${i ? esc(i.name) : "Apple cihazı"}</span>
+        <span class="tag">${esc(d.id.slice(0, 8))} · ${Math.round((now - d.seen) / 1000)} sn önce</span>
+      </div>
+      <div class="rssi"><div class="bar"><i style="width:${pct}%"></i></div>
+        <b>${d.hist.length ? `${d.hist[d.hist.length - 1]} dBm` : "RSSI yok"}</b></div>
+      ${i ? `<div class="batt">
+        <span>Sol <strong>${i.left}${bolt(i.chargeL)}</strong></span>
+        <span>Sağ <strong>${i.right}${bolt(i.chargeR)}</strong></span>
+        <span>Kutu <strong>${i.case}${bolt(i.chargeCase)}</strong></span>
+        <span>durum <strong>0x${i.status.toString(16).padStart(2, "0")}</strong></span>
+      </div>` : ""}
+      <div class="tag" style="margin-top:6px">${esc(types)}</div>
+      ${showRaw ? `<div class="raw">${hex(d.raw)}</div>` : ""}
+    </div>`;
+  }).join("");
+}
+
+const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+
+function setStatus(msg, err = false) {
+  $("status").textContent = msg;
+  $("status").classList.toggle("err", err);
+}
+
+async function start() {
+  if (!window.isSecureContext) return setStatus("Sayfa HTTPS üzerinden açılmalı.", true);
+  if (!navigator.bluetooth) {
+    return setStatus("Bu tarayıcıda Web Bluetooth yok. iPhone'da Safari/Chrome desteklemez; Bluefy gibi bir tarayıcı dene. Android/masaüstünde Chrome kullan.", true);
+  }
+  if (!navigator.bluetooth.requestLEScan) {
+    return setStatus("Web Bluetooth var ama tarama (requestLEScan) kapalı.\nChrome'da chrome://flags/#enable-experimental-web-platform-features ayarını açıp tarayıcıyı yeniden başlat.", true);
+  }
+  try {
+    stopDemo();
+    scan = await navigator.bluetooth.requestLEScan({ acceptAllAdvertisements: true, keepRepeatedDevices: true });
+    navigator.bluetooth.addEventListener("advertisementreceived", onEvent);
+    $("start").disabled = true; $("stop").disabled = false;
+    setStatus("Taranıyor… AirPods kutusunu aç ya da kulaklığı tak.");
+  } catch (e) {
+    setStatus(`Tarama başlatılamadı: ${e.message}`, true);
+  }
+}
+
+function onEvent(ev) {
+  const dv = ev.manufacturerData && ev.manufacturerData.get(APPLE);
+  if (!dv) return;
+  onAdvert(ev.device.id, ev.rssi, new Uint8Array(dv.buffer, dv.byteOffset, dv.byteLength));
+}
+
+function stop() {
+  if (scan) { scan.stop(); scan = null; }
+  if (navigator.bluetooth) navigator.bluetooth.removeEventListener("advertisementreceived", onEvent);
+  stopDemo();
+  $("start").disabled = false; $("stop").disabled = true;
+  setStatus("Durduruldu.");
+}
+
+// Demo: gerçek Bluetooth olmadan arayüzü denemek için sentetik paketler
+const DEMO = [
+  { id: "demo-pro2-usbc", base: -52, hex: "07 19 01 24 20 0b 98 85 11 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00" },
+  { id: "demo-airpods3", base: -74, hex: "07 19 01 13 20 2b 77 45 01 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00" },
+  { id: "demo-iphone", base: -61, hex: "10 05 0b 1c 6a 3e 12" },
+];
+function startDemo() {
+  stop();
+  const tick = () => DEMO.forEach((d) =>
+    onAdvert(d.id, d.base + Math.round((Math.random() - 0.5) * 8), Uint8Array.from(d.hex.split(" "), (x) => parseInt(x, 16))));
+  tick();
+  demoTimer = setInterval(tick, 700);
+  $("stop").disabled = false;
+  setStatus("Demo modu: sentetik paketler gösteriliyor, gerçek tarama değil.");
+}
+function stopDemo() { if (demoTimer) { clearInterval(demoTimer); demoTimer = null; } }
+
+$("start").onclick = start;
+$("stop").onclick = stop;
+$("demo").onclick = startDemo;
+$("onlyPods").onchange = render;
+$("showRaw").onchange = render;
+setInterval(render, 1000);
+</script>
+</body>
+</html>
