@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>AirPods Tarayıcı</title>
+<title>Bluetooth Tarayıcı</title>
 <style>
 :root {
   --bg: #f6f7f9; --card: #ffffff; --fg: #15171a; --muted: #6b7280; --line: #e3e6ea;
@@ -56,6 +56,7 @@ label { color: var(--muted); display: inline-flex; gap: 6px; align-items: center
 .batt { display: flex; gap: 16px; flex-wrap: wrap; font-variant-numeric: tabular-nums; }
 .batt span { color: var(--muted); }
 .batt strong { color: var(--fg); font-weight: 600; }
+.dist { font-size: 13px; color: var(--muted); }
 .raw {
   margin-top: 8px; font: 12px/1.4 ui-monospace, Menlo, monospace; color: var(--muted);
   word-break: break-all;
@@ -68,15 +69,15 @@ code { font-family: ui-monospace, Menlo, monospace; font-size: 13px; }
 </head>
 <body>
 <main>
-  <h1>AirPods Tarayıcı</h1>
-  <p class="sub">Çevredeki Apple BLE yayınlarını (üretici 0x004C) dinler, AirPods'ları sinyal gücüne göre sıralar.</p>
+  <h1>Bluetooth Tarayıcı</h1>
+  <p class="sub">Çevrede yayın yapan tüm BLE cihazlarını listeler; sinyali en güçlü (en yakın) olan en üstte. AirPods'ların pil bilgisi de çözülür.</p>
 
   <div class="controls">
     <button id="start" class="primary">Taramayı başlat</button>
     <button id="pick">Tek cihaz seç</button>
     <button id="stop" disabled>Durdur</button>
     <button id="demo">Demo verisi</button>
-    <label><input type="checkbox" id="onlyPods" checked> Yalnızca AirPods (0x07)</label>
+    <label><input type="checkbox" id="onlyPods"> Yalnızca AirPods</label>
     <label><input type="checkbox" id="showRaw"> Ham bayt</label>
   </div>
 
@@ -87,8 +88,8 @@ code { font-family: ui-monospace, Menlo, monospace; font-size: 13px; }
     <summary>Nerede çalışır?</summary>
     <p>Sayfa Web Bluetooth'un tarama özelliğini (<code>requestLEScan</code>) kullanır ve HTTPS gerektirir.</p>
     <p><b>Android / masaüstü Chrome:</b> <code>chrome://flags/#enable-experimental-web-platform-features</code> açılmalı.</p>
-    <p><b>iPhone:</b> Safari ve iOS'taki diğer tüm tarayıcılar Web Bluetooth desteklemez. Bluefy gibi tarayıcılar genel taramayı desteklemeyebilir; o zaman "Tek cihaz seç" ile listeden bir cihaz seçip yalnızca onun yayınları izlenir (<code>watchAdvertisements</code>).</p>
-    <p>Pil ve sol/sağ ayrımı Apple'ın belgelemediği, topluluk tarafından çözülmüş bir formata dayanır.</p>
+    <p><b>iPhone:</b> Safari ve iOS'taki diğer tüm tarayıcılar Web Bluetooth desteklemez. Bluefy genel taramayı desteklemiyor; "Tek cihaz seç" ile listeden cihazlar tek tek seçilip yalnızca onların yayınları izlenir (<code>watchAdvertisements</code>).</p>
+    <p>Yakınlık yalnızca sinyal gücünden (RSSI) tahmin edilir; metre değerleri kabadır. Pil ve sol/sağ ayrımı Apple'ın belgelemediği, topluluk tarafından çözülmüş bir formata dayanır.</p>
   </details>
 </main>
 
@@ -102,6 +103,15 @@ const MODELS = {
   0x200a: "AirPods Max", 0x201f: "AirPods Max (USB-C)",
   0x2019: "AirPods 4", 0x201b: "AirPods 4 ANC",
 };
+
+// Bluetooth SIG üretici kimlikleri (sık görülenler)
+const COMPANIES = {
+  0x004c: "Apple", 0x0006: "Microsoft", 0x0075: "Samsung", 0x00e0: "Google", 0x0087: "Garmin",
+  0x0157: "Huawei", 0x038f: "Xiaomi", 0x027d: "Huawei", 0x0059: "Nordic", 0x000f: "Broadcom",
+  0x0171: "Amazon", 0x01da: "Logitech", 0x00d2: "Dialog", 0x02e5: "Espressif", 0x0499: "Ruuvi",
+  0x0310: "SGL Italia", 0x012d: "Sony", 0x0002: "Intel", 0x001d: "Qualcomm", 0x0822: "Bose",
+};
+const company = (id) => COMPANIES[id] || `0x${id.toString(16).padStart(4, "0")}`;
 
 // Continuity TLV türleri: hangi Apple yayınını gördüğünü doğrulamak için
 const TYPES = {
@@ -150,25 +160,37 @@ function parseProximity(b) {
   };
 }
 
-function onAdvert(id, rssi, bytes) {
-  const tlvs = parseApple(bytes);
-  if (!tlvs.length) return;
-  let d = devices.get(id);
+// a: { id, name, rssi, mfr: Map<şirketId, Uint8Array>, uuids: string[] }
+function onAdvert(a) {
+  let d = devices.get(a.id);
   if (!d) {
-    d = { id, hist: [], info: null, types: new Set() };
-    devices.set(id, d);
+    d = { id: a.id, name: null, hist: [], info: null, types: new Set(), mfr: new Map(), uuids: new Set() };
+    devices.set(a.id, d);
   }
-  if (typeof rssi === "number") {
-    d.hist.push(rssi);
+  if (a.name) d.name = a.name;
+  if (typeof a.rssi === "number") {
+    d.hist.push(a.rssi);
     if (d.hist.length > 5) d.hist.shift();
   }
   d.seen = Date.now();
-  d.raw = bytes;
-  for (const { type, body } of tlvs) {
-    d.types.add(type);
-    if (type === 0x07) d.info = parseProximity(body) || d.info;
+  for (const u of a.uuids || []) d.uuids.add(u);
+  for (const [cid, bytes] of a.mfr || []) {
+    d.mfr.set(cid, bytes);
+    if (cid !== APPLE) continue;
+    for (const { type, body } of parseApple(bytes)) {
+      d.types.add(type);
+      if (type === 0x07) d.info = parseProximity(body) || d.info;
+    }
   }
   scheduleRender();
+}
+
+// RSSI'dan kaba yakınlık; duvar, beden ve cihazın yayın gücü sonucu çok oynatır
+function proximity(rssi) {
+  if (rssi >= -55) return "çok yakın (~1 m içi)";
+  if (rssi >= -67) return "yakın (~1–3 m)";
+  if (rssi >= -80) return "orta (~3–10 m)";
+  return "uzak (10 m+)";
 }
 
 let renderPending = false;
@@ -189,30 +211,38 @@ function render() {
     .sort((a, b) => avg(b.hist) - avg(a.hist));
   const list = $("list");
   if (!rows.length) {
-    list.innerHTML = `<div class="empty">${devices.size ? "AirPods yayını yok — filtreyi kapatıp diğer Apple yayınlarına bak." : "Henüz cihaz yok."}</div>`;
+    list.innerHTML = `<div class="empty">${devices.size ? "AirPods yayını yok — filtreyi kapatıp diğer cihazlara bak." : "Henüz cihaz yok."}</div>`;
     return;
   }
   list.innerHTML = rows.map((d) => {
     const a = avg(d.hist);
     const pct = Math.max(0, Math.min(100, ((a + 100) / 60) * 100));
-    const types = [...d.types].map((t) => TYPES[t] || `0x${t.toString(16).padStart(2, "0")}`).join(", ");
+    const types = [...d.types].map((t) => TYPES[t] || `0x${t.toString(16).padStart(2, "0")}`);
+    const makers = [...d.mfr.keys()].map(company);
+    const details = [
+      makers.length ? `Üretici: ${makers.join(", ")}` : "",
+      types.length ? `Apple: ${types.join(", ")}` : "",
+      d.uuids.size ? `${d.uuids.size} servis` : "",
+    ].filter(Boolean).join(" · ") || "Üretici verisi yok";
     const i = d.info;
+    const title = i ? i.name : d.name || (makers.length ? `${makers[0]} cihazı` : "Adsız cihaz");
     const bolt = (on) => (on ? " ⚡" : "");
     return `<div class="dev${now - d.seen > STALE_MS ? " stale" : ""}">
       <div class="row">
-        <span class="name">${i ? esc(i.name) : "Apple cihazı"}</span>
+        <span class="name">${esc(title)}</span>
         <span class="tag">${esc(d.id.slice(0, 8))} · ${Math.round((now - d.seen) / 1000)} sn önce</span>
       </div>
       <div class="rssi"><div class="bar"><i style="width:${pct}%"></i></div>
         <b>${d.hist.length ? `${d.hist[d.hist.length - 1]} dBm` : "RSSI yok"}</b></div>
+      ${d.hist.length ? `<div class="dist">${proximity(a)} · tahmini</div>` : ""}
       ${i ? `<div class="batt">
         <span>Sol <strong>${i.left}${bolt(i.chargeL)}</strong></span>
         <span>Sağ <strong>${i.right}${bolt(i.chargeR)}</strong></span>
         <span>Kutu <strong>${i.case}${bolt(i.chargeCase)}</strong></span>
         <span>durum <strong>0x${i.status.toString(16).padStart(2, "0")}</strong></span>
       </div>` : ""}
-      <div class="tag" style="margin-top:6px">${esc(types)}</div>
-      ${showRaw ? `<div class="raw">${hex(d.raw)}</div>` : ""}
+      <div class="tag" style="margin-top:6px">${esc(details)}</div>
+      ${showRaw ? [...d.mfr].map(([cid, b]) => `<div class="raw">${esc(company(cid))}: ${hex(b)}</div>`).join("") : ""}
     </div>`;
   }).join("");
 }
@@ -231,7 +261,7 @@ async function start() {
   }
   if (!navigator.bluetooth.requestLEScan) {
     return setStatus(isIOS
-      ? "Bu tarayıcı çevredeki tüm cihazları taramayı (requestLEScan) desteklemiyor.\n\"Tek cihaz seç\" ile listeden AirPods'u seçip yalnızca onu izlemeyi dene."
+      ? "Bu tarayıcı çevredeki tüm cihazları taramayı (requestLEScan) desteklemiyor.\n\"Tek cihaz seç\" ile listeden bir cihaz seçip yalnızca onu izlemeyi dene."
       : "Web Bluetooth var ama tarama (requestLEScan) kapalı.\nChrome'da chrome://flags/#enable-experimental-web-platform-features ayarını açıp tarayıcıyı yeniden başlat.\nYa da \"Tek cihaz seç\" ile tek bir cihazı izle.", true);
   }
   try {
@@ -246,9 +276,11 @@ async function start() {
 }
 
 function onEvent(ev) {
-  const dv = ev.manufacturerData && ev.manufacturerData.get(APPLE);
-  if (!dv) return;
-  onAdvert(ev.device.id, ev.rssi, new Uint8Array(dv.buffer, dv.byteOffset, dv.byteLength));
+  const mfr = new Map();
+  if (ev.manufacturerData) {
+    for (const [cid, dv] of ev.manufacturerData) mfr.set(cid, new Uint8Array(dv.buffer, dv.byteOffset, dv.byteLength));
+  }
+  onAdvert({ id: ev.device.id, name: ev.name || ev.device.name, rssi: ev.rssi, mfr, uuids: ev.uuids || [] });
 }
 
 // Genel tarama yoksa: kullanıcı listeden bir cihaz seçer, yalnızca onun yayınları izlenir
@@ -257,16 +289,12 @@ async function pick() {
   if (!navigator.bluetooth) return setStatus("Bu tarayıcıda Web Bluetooth yok.", true);
   let device;
   try {
-    try {
-      device = await navigator.bluetooth.requestDevice({
-        filters: [{ manufacturerData: [{ companyIdentifier: APPLE }] }],
-        optionalManufacturerData: [APPLE],
-      });
-    } catch (e) {
-      // Üretici filtresini desteklemeyen tarayıcılarda tüm cihazları listele
-      if (e.name !== "TypeError") throw e;
-      device = await navigator.bluetooth.requestDevice({ acceptAllDevices: true, optionalManufacturerData: [APPLE] });
-    }
+    setStatus("Cihaz listesi açılıyor…");
+    // watchAdvertisements yalnızca burada adı geçen üreticilerin verisini verir
+    device = await navigator.bluetooth.requestDevice({
+      acceptAllDevices: true,
+      optionalManufacturerData: Object.keys(COMPANIES).map(Number),
+    });
   } catch (e) {
     if (e.name === "NotFoundError") return setStatus("Cihaz seçilmedi.");
     return setStatus(`Cihaz seçilemedi: ${e.name}: ${e.message}`, true);
@@ -281,7 +309,7 @@ async function pick() {
     await device.watchAdvertisements({ signal: ctl.signal });
     watched.push({ device, ctl });
     $("stop").disabled = false;
-    setStatus(`İzleniyor: ${device.name || device.id} (${watched.length} cihaz). Apple verisi gelmezse listede görünmez; "Yalnızca AirPods" filtresini kapat.`);
+    setStatus(`İzleniyor: ${device.name || device.id} (${watched.length} cihaz). Başka cihaz eklemek için tekrar "Tek cihaz seç".`);
   } catch (e) {
     setStatus(`Yayın izleme başlatılamadı: ${e.name}: ${e.message}`, true);
   }
@@ -301,15 +329,21 @@ function stop() {
 }
 
 // Demo: gerçek Bluetooth olmadan arayüzü denemek için sentetik paketler
+const bytes = (h) => Uint8Array.from(h.split(" "), (x) => parseInt(x, 16));
 const DEMO = [
-  { id: "demo-pro2-usbc", base: -52, hex: "07 19 01 24 20 0b 98 85 11 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00" },
-  { id: "demo-airpods3", base: -74, hex: "07 19 01 13 20 2b 77 45 01 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00" },
-  { id: "demo-iphone", base: -61, hex: "10 05 0b 1c 6a 3e 12" },
+  { id: "demo-pro2-usbc", base: -52, mfr: [[APPLE, "07 19 01 24 20 0b 98 85 11 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00"]] },
+  { id: "demo-airpods3", base: -74, mfr: [[APPLE, "07 19 01 13 20 2b 77 45 01 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00"]] },
+  { id: "demo-iphone", base: -61, mfr: [[APPLE, "10 05 0b 1c 6a 3e 12"]] },
+  { id: "demo-galaxy-watch", base: -66, name: "Galaxy Watch6", mfr: [[0x0075, "01 00 02 00 01 01 ff 00"]] },
+  { id: "demo-mi-band", base: -83, name: "Mi Smart Band 8", mfr: [[0x038f, "16 03 aa bb"]], uuids: ["0000fe95-0000-1000-8000-00805f9b34fb"] },
+  { id: "demo-unknown", base: -90, uuids: ["0000feaa-0000-1000-8000-00805f9b34fb"] },
 ];
 function startDemo() {
   stop();
-  const tick = () => DEMO.forEach((d) =>
-    onAdvert(d.id, d.base + Math.round((Math.random() - 0.5) * 8), Uint8Array.from(d.hex.split(" "), (x) => parseInt(x, 16))));
+  const tick = () => DEMO.forEach((d) => onAdvert({
+    id: d.id, name: d.name, rssi: d.base + Math.round((Math.random() - 0.5) * 8),
+    mfr: new Map((d.mfr || []).map(([c, h]) => [c, bytes(h)])), uuids: d.uuids || [],
+  }));
   tick();
   demoTimer = setInterval(tick, 700);
   $("stop").disabled = false;
